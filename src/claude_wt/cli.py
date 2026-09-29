@@ -242,8 +242,16 @@ def agent_command(cmd: str, prompt_text: str, agent_args: list[str], session_id:
     return argv + agent_args
 
 
-# Background maintenance would try to pack refs into the read-only .git and print errors after every commit.
-AGENT_GIT_CONFIG = (("maintenance.auto", "false"), ("gc.auto", "0"))
+def sandbox_git_config(remotes: list[str]) -> tuple[tuple[str, str], ...]:
+    """Git config the agent needs to work inside the sandbox's read-only refs.
+
+    - Background maintenance would try to pack refs and print errors after every commit.
+    - refs/tags is read-only, so a fetch that auto-follows a new tag would exit non-zero after updating the branches.
+      Existing tags stay readable, and the user's own next fetch picks up new ones.
+    """
+    pairs = [("maintenance.auto", "false"), ("gc.auto", "0")]
+    pairs += [(f"remote.{name}.tagOpt", "--no-tags") for name in remotes]
+    return tuple(pairs)
 
 
 def with_git_config(env: dict[str, str], pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:
@@ -257,7 +265,7 @@ def with_git_config(env: dict[str, str], pairs: tuple[tuple[str, str], ...]) -> 
     return out
 
 
-def agent_env(ctx: Context, meta: Meta, prompt_file: Path) -> dict[str, str]:
+def agent_env(ctx: Context, meta: Meta, prompt_file: Path, sandboxed: bool) -> dict[str, str]:
     bin_dir = ctx.state.bin_dir
     env = {
         **os.environ,
@@ -268,7 +276,9 @@ def agent_env(ctx: Context, meta: Meta, prompt_file: Path) -> dict[str, str]:
         "CLAUDE_WT_MAIN": meta.main_checkout,
         "CLAUDE_WT_PROMPT_FILE": str(prompt_file),
     }
-    return with_git_config(env, AGENT_GIT_CONFIG)
+    if not sandboxed:
+        return env
+    return with_git_config(env, sandbox_git_config(gitops.remotes(ctx.repo.toplevel)))
 
 
 def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[str]) -> int:
@@ -301,7 +311,7 @@ def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[
 
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C belongs to the agent
     try:
-        code = subprocess.run(cmd, cwd=wt, env=agent_env(ctx, meta, prompt_file), check=False).returncode
+        code = subprocess.run(cmd, cwd=wt, env=agent_env(ctx, meta, prompt_file, caps.bwrap), check=False).returncode
     finally:
         signal.signal(signal.SIGINT, previous)
     return code

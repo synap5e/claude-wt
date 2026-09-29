@@ -53,6 +53,10 @@ def ref_format(cwd: Path) -> str:
     return git("rev-parse", "--show-ref-format", cwd=cwd, check=False) or "files"
 
 
+def remotes(cwd: Path) -> list[str]:
+    return git("remote", cwd=cwd).split()
+
+
 def dirty_entries(cwd: Path) -> list[str]:
     """Porcelain lines for modified, staged and untracked (non-ignored) files."""
     out = git("status", "--porcelain=v1", "--untracked-files=all", cwd=cwd)

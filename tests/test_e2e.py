@@ -244,3 +244,25 @@ def test_sandbox_pins_refs_to_own_branch(repo: Path, tmp_path: Path) -> None:
     assert sh("git", "branch", "--list", "scratch", cwd=repo) == ""
     assert sh("git", "log", "-1", "--format=%s", "wt/t16/work", cwd=repo) == "c"
     assert sh("git", "merge-base", "--is-ancestor", "other", "wt/t16/work", cwd=repo) == ""
+
+
+@needs_bwrap
+def test_sandboxed_fetch_updates_remote_refs_despite_new_tags(repo: Path, tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    sh("git", "clone", "-q", "--bare", str(repo), str(origin), cwd=tmp_path)
+    sh("git", "remote", "add", "origin", str(origin), cwd=repo)
+    sh("git", "fetch", "-q", "origin", cwd=repo)
+    sh("git", "pack-refs", "--all", cwd=repo)
+    upstream = tmp_path / "upstream"
+    sh("git", "clone", "-q", str(origin), str(upstream), cwd=tmp_path)
+    (upstream / "u.txt").write_text("u\n")
+    sh("git", "add", "u.txt", cwd=upstream)
+    sh("git", "commit", "-qm", "upstream", cwd=upstream)
+    sh("git", "tag", "v1", cwd=upstream)
+    sh("git", "push", "-q", "origin", "main", "v1", cwd=upstream)
+
+    out = tmp_path / "out"
+    assert run("new", "t17", "-S", *agent(f"git fetch -q origin 2>> {out}; echo fetch=$? >> {out}")) == 0
+    assert out.read_text() == "fetch=0\n"
+    assert sh("git", "log", "-1", "--format=%s", "origin/main", cwd=repo) == "upstream"
+    assert sh("git", "tag", cwd=repo) == ""  # tags are left for the user's own fetch

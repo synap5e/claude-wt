@@ -48,7 +48,8 @@ def render(ctx: PromptContext) -> str:
         + (
             "It is mounted read-only for this session, and so is the repo's .git apart from your own branch: "
             "other branches, git config and `git stash` (shared with the main checkout) are off limits. "
-            "Commit work in progress instead of stashing it."
+            "Commit work in progress instead of stashing it. `git fetch` works but skips tags, and `--prune` "
+            "can't remove packed remote-tracking refs."
             if ctx.sandboxed
             else "Nothing enforces this, so take care with absolute paths."
         ),

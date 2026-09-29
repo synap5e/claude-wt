@@ -149,7 +149,12 @@ ref, so each branch gets its own directory.
 
 The result: the kernel refuses moving any other branch, whether through porcelain or plumbing (`update-ref`,
 `branch -f`, a rewritten `packed-refs`). It also refuses creating branches, changing the main checkout's HEAD, and
-editing git config or hooks. `git stash` is unavailable, because `refs/stash` is shared with the main checkout. Git's
+editing git config or hooks. `git stash` is unavailable, because `refs/stash` is shared with the main checkout. `git fetch` works, but tags are skipped
+(the agent's git gets `--no-tags` for every remote, because `refs/tags` is read-only): existing tags stay readable,
+and your own next fetch picks up new ones. `fetch --prune` can't remove remote-tracking refs that live in
+`packed-refs`.
+
+The network isn't sandboxed, so `git push` reaches the real remote. Git's
 background maintenance is turned off inside, since it would try to pack refs. Repos using the reftable ref storage
 can't be split per branch, so they count as "no sandbox".
 
