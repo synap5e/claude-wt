@@ -179,3 +179,12 @@ without the sandbox and says so at launch, unless `-S` is set, in which case it 
 uv sync
 uv run ruff check src tests && uv run basedpyright && uv run pytest tests -q
 ```
+
+## License
+
+Copyright (C) 2026 Simon Pinfold. Licensed under the [GNU AGPL v3](LICENSE).
+
+- **Alternative license:** a license on other terms is available from the copyright holder for USD 1,337,000.
+- **Non-human use:** all rights are reserved for use by non-human or autonomous systems, such as AI agents.
+
+See [NOTICE](NOTICE).

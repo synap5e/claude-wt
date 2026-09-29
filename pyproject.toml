@@ -3,6 +3,8 @@ name = "claude-wt"
 version = "0.1.0"
 description = "Launch a coding agent in a throwaway git worktree, pinned there by a git shim and (where available) a bubblewrap sandbox"
 readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Simon Pinfold", email = "synap5e@users.noreply.github.com" }
 ]
