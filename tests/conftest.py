@@ -19,7 +19,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(f"GIT_{var}_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.delenv("CLAUDE_WT_ALLOW_SWITCH", raising=False)
+    monkeypatch.delenv("CLAUDE_WT_ALLOW", raising=False)
 
 
 @pytest.fixture

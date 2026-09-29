@@ -103,7 +103,7 @@ def test_shim_blocks_switch_but_allows_commits(repo: Path, tmp_path: Path, sandb
 @pytest.mark.usefixtures("repo")
 def test_allow_env_lets_switch_through(tmp_path: Path) -> None:
     out = tmp_path / "out"
-    script = f"CLAUDE_WT_ALLOW_SWITCH=1 git switch -q -c elsewhere; git branch --show-current > {out}"
+    script = f"CLAUDE_WT_ALLOW=1 git switch -q -c elsewhere; git branch --show-current > {out}"
     assert run("new", "t7", *agent(script, "--no-sandbox")) == 0
     assert out.read_text().strip() == "elsewhere"
 
@@ -266,3 +266,32 @@ def test_sandboxed_fetch_updates_remote_refs_despite_new_tags(repo: Path, tmp_pa
     assert out.read_text() == "fetch=0\n"
     assert sh("git", "log", "-1", "--format=%s", "origin/main", cwd=repo) == "upstream"
     assert sh("git", "tag", cwd=repo) == ""  # tags are left for the user's own fetch
+
+
+@pytest.mark.parametrize("sandbox", [["--no-sandbox"], pytest.param(["-S"], marks=needs_bwrap)])
+def test_push_only_own_branch(repo: Path, tmp_path: Path, sandbox: list[str]) -> None:
+    origin = tmp_path / "origin.git"
+    sh("git", "clone", "-q", "--bare", str(repo), str(origin), cwd=tmp_path)
+    sh("git", "remote", "add", "origin", str(origin), cwd=repo)
+    sh("git", "fetch", "-q", "origin", cwd=repo)
+    out = tmp_path / "out"
+    script = (
+        f"echo x > c.txt && git add c.txt && git commit -qm c; "
+        f"git push -q origin HEAD 2>/dev/null; echo own=$? >> {out}; "
+        f"git push -q origin HEAD:pr-branch 2>/dev/null; echo new=$? >> {out}; "
+        f"git push -q -f origin HEAD:main 2>> {out}; echo main=$? >> {out}; "
+        f"git push -q origin other:elsewhere 2>/dev/null; echo other=$? >> {out}; "
+        f"git push -q origin :other 2>/dev/null; echo delete=$? >> {out}"
+    )
+    main_before = sh("git", "rev-parse", "main", cwd=origin)
+    assert run("new", "t18", *sandbox, *agent(script)) == 0
+    text = out.read_text()
+    assert "own=0" in text
+    assert "new=0" in text
+    assert "claude-wt: blocked: pushing to origin/main" in text
+    for step in ("main", "other", "delete"):
+        assert f"{step}=1" in text, step
+    assert sh("git", "rev-parse", "main", cwd=origin) == main_before
+    assert sh("git", "branch", "--list", "other", cwd=origin) != ""
+    assert sh("git", "branch", "--list", "elsewhere", cwd=origin) == ""
+    assert sh("git", "log", "-1", "--format=%s", "pr-branch", cwd=origin) == "c"

@@ -17,7 +17,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-ALLOW_ENV = "CLAUDE_WT_ALLOW_SWITCH"
+from . import pushrules
+
+ALLOW_ENV = "CLAUDE_WT_ALLOW"
 SHIM_DIR_ENV = "CLAUDE_WT_SHIM_DIR"
 
 # Global options that consume the following argv element.
@@ -36,7 +38,7 @@ _GLOBAL_WITH_ARG = {
 _KNOWN_SAFE = {
     "add", "am", "apply", "blame", "branch", "cat-file", "cherry-pick", "clean", "commit", "config", "describe",
     "diff", "fetch", "format-patch", "grep", "log", "ls-files", "ls-tree", "merge", "merge-base", "mv", "notes",
-    "pull", "push", "rebase", "reflog", "remote", "reset", "restore", "rev-list", "rev-parse", "revert", "rm",
+    "pull", "rebase", "reflog", "remote", "reset", "restore", "rev-list", "rev-parse", "revert", "rm",
     "shortlog", "show", "stash", "status", "submodule", "symbolic-ref", "tag", "update-index", "bisect", "help",
 }  # fmt: skip
 
@@ -80,16 +82,26 @@ def _checkout_verdict(args: list[str], is_commit: Callable[[str], bool]) -> str 
     return None  # `git checkout <file>` or `git checkout <tree-ish> <paths...>` restores files
 
 
-def verdict(inv: Invocation, is_commit: Callable[[str], bool], alias_of: Callable[[str], str | None]) -> str | None:
-    """Reason to block, or None to pass through. Pure apart from the two injected lookups."""
+def verdict(
+    inv: Invocation,
+    is_commit: Callable[[str], bool],
+    alias_of: Callable[[str], str | None],
+    push: pushrules.Lookups | None = None,
+) -> str | None:
+    """Reason to block, or None to pass through. Pure apart from the injected lookups.
+
+    `push` is None outside a claude-wt session (no own branch known), which leaves pushes alone."""
     sub, args = inv.subcommand, inv.args
     if sub is None or _is_help(args):
         return None
-    if sub not in _KNOWN_SAFE and sub not in {"switch", "checkout", "worktree"}:
+    if sub not in _KNOWN_SAFE and sub not in {"switch", "checkout", "worktree", "push"}:
         expansion = alias_of(sub)
         if expansion and not expansion.startswith("!"):
             words = expansion.split()
-            return verdict(Invocation(inv.global_args, words[0], words[1:] + args), is_commit, lambda _: None)
+            expanded = Invocation(inv.global_args, words[0], words[1:] + args)
+            return verdict(expanded, is_commit, lambda _: None, push)
+    if sub == "push":
+        return pushrules.verdict(args, push) if push else None
     if sub == "switch":
         return "`git switch` moves this worktree's HEAD"
     if sub == "checkout":
@@ -123,7 +135,7 @@ def block_message(reason: str) -> str:
     return (
         f"claude-wt: blocked: {reason}.\n"
         f"This session is pinned to {wt} on branch {branch}. Commit your work here instead.\n"
-        f"If the user has explicitly asked you to change branches, rerun with {ALLOW_ENV}=1."
+        f"If the user has explicitly asked for this, rerun with {ALLOW_ENV}=1."
     )
 
 
@@ -146,7 +158,16 @@ def main() -> None:
             out = _run_git(real_git, inv.global_args, "config", "--get", f"alias.{name}").stdout.strip()
             return out or None
 
-        reason = verdict(inv, is_commit, alias_of)
+        def config(key: str) -> str | None:
+            return _run_git(real_git, inv.global_args, "config", "--get", key).stdout.strip() or None
+
+        def remote_has_branch(remote: str, branch: str) -> bool:
+            ref = f"refs/remotes/{remote}/{branch}"
+            return _run_git(real_git, inv.global_args, "rev-parse", "--verify", "--quiet", ref).returncode == 0
+
+        own = os.environ.get("CLAUDE_WT_BRANCH")
+        push = pushrules.Lookups(own, config, remote_has_branch) if own else None
+        reason = verdict(inv, is_commit, alias_of, push)
         if reason:
             print(block_message(reason), file=sys.stderr)
             raise SystemExit(1)

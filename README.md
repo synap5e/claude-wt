@@ -42,6 +42,8 @@ From a clone: `uv tool install .` (add `--editable` to pick up local changes).
      dependency dirs. It's also written to `$CLAUDE_WT_PROMPT_FILE` for other agents.
    - a `git` shim first on its `PATH` that refuses `switch`, branch-moving `checkout`, and `worktree add/move/remove`
      *before* git runs. Aliases are followed. `git checkout -- <file>` and `git checkout <rev> <paths>` still work.
+   - the same shim limits `git push` to the agent's own branch, pushed either to its own name or to a branch that
+     doesn't exist on the remote yet (see *Pushing*).
    - if bubblewrap works: the main checkout mounted **read-only**, and the shared `.git` locked down so the agent
      can commit to its own branch and nothing else (see *Sandbox notes*).
 5. **Hands back to you** when the agent exits (see *Landing the work*).
@@ -90,11 +92,24 @@ The `reference-transaction` hook can abort a HEAD move, but it fires *after* `gi
 tree. Aborting there leaves the other branch's files staged on the old branch. It also breaks `git rebase`, which
 detaches HEAD partway through.
 
-The shim is a guardrail, not a security boundary. `CLAUDE_WT_ALLOW_SWITCH=1`, or calling git by its absolute path,
+The shim is a guardrail, not a security boundary. `CLAUDE_WT_ALLOW=1`, or calling git by its absolute path,
 bypasses it. The block message tells the agent about the override and says to use it only when the user asks.
 
 If you already have a PATH-shadowing git wrapper, the shim removes itself from `PATH` before handing off, so the two
 don't find each other in a loop.
+
+### Pushing
+
+The sandbox pins local refs, but the network isn't sandboxed, so pushes are checked by the shim. Allowed: the agent's
+own branch (`HEAD`, `@` or its name) to its own name or a new remote branch, with or without `--force`. Refused:
+
+- pushing any other branch or commit
+- overwriting a remote branch that exists (per the local remote-tracking refs), and `main`/`master` always
+- deleting (`:branch`, `--delete`, `-d`), `--all`, `--mirror`, `--prune`, tags (`--tags`, `--follow-tags`, `refs/tags/...`)
+- a bare `git push` when `push.default=matching` or `remote.<name>.push` would push more than the current branch
+
+Like the rest of the shim this is a guardrail, not a boundary: git called by its absolute path, or
+`CLAUDE_WT_ALLOW=1`, gets past it. Branch protection on the remote is the real boundary.
 
 ## Dependency directories (`--deps`)
 

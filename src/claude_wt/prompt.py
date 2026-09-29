@@ -53,6 +53,9 @@ def render(ctx: PromptContext) -> str:
             if ctx.sandboxed
             else "Nothing enforces this, so take care with absolute paths."
         ),
+        "- Push only your own branch, to its own name or a new remote branch (e.g. `git push -u origin HEAD` or "
+        "`git push origin HEAD:<new-name>`). The `git` on your PATH refuses pushes of other branches, deletes, tags, "
+        "and overwriting existing remote branches.",
         "- Commit as you go. Uncommitted changes are only in this worktree and are easy to lose.",
     ]
     if ctx.carried_dirty:
