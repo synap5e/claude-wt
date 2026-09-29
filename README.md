@@ -10,8 +10,7 @@ claude-wt resume fix-login     # relaunch later
 claude-wt ls
 claude-wt rm fix-login
 ```
-
-Requires git and Python 3.11+. Uses [bubblewrap](https://github.com/containers/bubblewrap) when it's available.
+Linux only. Requires git and Python 3.11+. Uses [bubblewrap](https://github.com/containers/bubblewrap) when it's available.
 No other dependencies.
 
 ```sh
