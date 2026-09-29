@@ -4,19 +4,28 @@ Launch Claude Code (or another coding agent) in a throwaway git worktree, and ke
 
 ```sh
 cd my-repo
-claude-wt                      # new worktree from HEAD, branch wt/<timestamp>, launches `claude`
+claude-wt                      # new worktree from HEAD, branch wt/<timestamp>/work, launches `claude`
 claude-wt fix-login -- --model opus   # name it; everything after -- goes to the agent
+claude-wt -S --carry-dirty wip # require the sandbox; bring uncommitted changes along
 claude-wt resume fix-login     # relaunch later, same conversation
 claude-wt land fix-login       # merge/squash/keep/discard menu
 claude-wt ls
 claude-wt rm fix-login
 ```
-Linux only. Requires git and Python 3.11+. Uses [bubblewrap](https://github.com/containers/bubblewrap) when it's available.
-No other dependencies.
+
+## Install
+
+Linux only. Requires git and Python 3.11+. Uses [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) for
+the sandbox when it's available. No other dependencies.
 
 ```sh
-uv tool install .   # from a clone
+uv tool install git+https://github.com/synap5e/claude-wt
+uv tool upgrade claude-wt                                    # later
+
+uvx --from git+https://github.com/synap5e/claude-wt claude-wt   # or run without installing
 ```
+
+From a clone: `uv tool install .` (add `--editable` to pick up local changes).
 
 ## What it does
 
