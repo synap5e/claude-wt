@@ -2,8 +2,11 @@
 
 claude-wt [new] [SLUG] [options] [-- AGENT ARGS...]
 claude-wt resume SLUG [options] [-- AGENT ARGS...]
+claude-wt land SLUG
 claude-wt ls
 claude-wt rm SLUG [--force]
+
+When the agent exits, a menu offers to merge or squash its branch into the main checkout, resume, keep or discard.
 """
 
 from __future__ import annotations
@@ -17,17 +20,18 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+import uuid
 from pathlib import Path
 
 from . import deps, gitops, guard, sandbox
-from .errors import DirtyTreeError, GitError, WorktreeNotFoundError, WtError
+from .context import BRANCH_PREFIX, Context, remove
+from .errors import DirtyTreeError, WorktreeNotFoundError, WtError
+from .land import Outcome, land
 from .prompt import PromptContext, render
-from .state import Meta, RepoState, sweep_stale_boots
+from .state import Meta, sweep_stale_boots
 
-SUBCOMMANDS = {"new", "resume", "ls", "rm"}
+SUBCOMMANDS = {"new", "resume", "land", "ls", "rm"}
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-BRANCH_PREFIX = "wt/"
 
 
 def _launch_options(p: argparse.ArgumentParser) -> None:
@@ -40,6 +44,7 @@ def _launch_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-sandbox", action="store_true", help="don't wrap the agent in bubblewrap")
     p.add_argument("--cmd", default="claude", help="agent command (default: claude); shell-split")
     p.add_argument("--print-prompt", action="store_true", help="print the intro prompt and exit without launching")
+    p.add_argument("--no-land", action="store_true", help="skip the merge/keep menu after the agent exits")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume = sub.add_parser("resume", help="relaunch the agent in an existing worktree")
     resume.add_argument("slug")
     _launch_options(resume)
+
+    land_p = sub.add_parser("land", help="merge, squash, resume, keep or discard a worktree's work")
+    land_p.add_argument("slug")
 
     sub.add_parser("ls", help="list this repo's worktrees")
 
@@ -89,17 +97,6 @@ def normalise_argv(argv: list[str]) -> list[str]:
 # ---------------------------------------------------------------- new
 
 
-@dataclass(frozen=True)
-class Context:
-    repo: gitops.Repo
-    state: RepoState
-
-
-def _context() -> Context:
-    repo = gitops.discover(Path.cwd())
-    return Context(repo, RepoState.for_repo(repo.common_dir, repo.name))
-
-
 def _validate_slug(ctx: Context, slug: str) -> None:
     if not SLUG_RE.match(slug):
         raise WtError(f"invalid slug {slug!r}: use letters, digits, '.', '_' and '-'")
@@ -109,47 +106,76 @@ def _validate_slug(ctx: Context, slug: str) -> None:
         raise WtError(f"branch {BRANCH_PREFIX}{slug} already exists; pick another slug")
 
 
-def _start_commit(ctx: Context, args: argparse.Namespace, base_sha: str) -> tuple[str, bool]:
+def _start_commit(ctx: Context, args: argparse.Namespace, base_sha: str) -> tuple[str, str | None]:
+    """The commit the new branch starts at, and the carried-changes WIP commit if there is one."""
     entries = gitops.dirty_entries(ctx.repo.toplevel)
-    if not entries:
-        return base_sha, False
-    if args.allow_dirty:
-        return base_sha, False
+    if not entries or args.allow_dirty:
+        return base_sha, None
     if not args.carry_dirty:
         raise DirtyTreeError(str(ctx.repo.toplevel), entries)
     if base_sha != ctx.repo.head:
         raise WtError("--carry-dirty needs --base to be the current HEAD: the changes were made against it")
     message = f"WIP: uncommitted changes carried over by claude-wt\n\nFrom {ctx.repo.toplevel} ({len(entries)} paths)."
-    return gitops.snapshot_commit(ctx.repo.toplevel, ctx.repo.head, message), True
+    wip = gitops.snapshot_commit(ctx.repo.toplevel, ctx.repo.head, message)
+    return wip, wip
 
 
 def cmd_new(args: argparse.Namespace, agent_args: list[str]) -> int:
-    ctx = _context()
+    ctx = Context.here()
     slug = args.slug or time.strftime("%Y%m%d-%H%M%S")
     _validate_slug(ctx, slug)
     base_sha = gitops.resolve_commit(ctx.repo.toplevel, args.base)
-    start, carried = _start_commit(ctx, args, base_sha)
+    start, wip = _start_commit(ctx, args, base_sha)
     meta = Meta(
         slug=slug,
         branch=BRANCH_PREFIX + slug,
         base_ref=ctx.repo.branch if args.base == "HEAD" and ctx.repo.branch else args.base,
         base_sha=base_sha,
         main_checkout=str(ctx.repo.toplevel),
-        carried_dirty=carried,
+        carried_dirty=wip is not None,
+        wip_sha=wip,
+        session_id=str(uuid.uuid4()) if is_claude(args.cmd) else None,
     )
     path = ctx.state.worktree(slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     gitops.add_worktree(ctx.repo.toplevel, path, meta.branch, start)
     ctx.state.write_meta(meta)
-    return launch(ctx, meta, args, agent_args)
+    return run_session(ctx, meta, args, agent_args)
 
 
 def cmd_resume(args: argparse.Namespace, agent_args: list[str]) -> int:
-    ctx = _context()
+    ctx = Context.here()
     meta = ctx.state.read_meta(args.slug)
     if meta is None or not ctx.state.worktree(args.slug).exists():
         raise WorktreeNotFoundError(args.slug)
-    return launch(ctx, meta, args, agent_args)
+    if meta.session_id is None and is_claude(args.cmd):
+        meta = dataclasses.replace(meta, session_id=str(uuid.uuid4()))
+        ctx.state.write_meta(meta)
+    return run_session(ctx, meta, args, agent_args)
+
+
+def cmd_land(args: argparse.Namespace, _agent_args: list[str]) -> int:
+    ctx = Context.here()
+    meta = ctx.state.read_meta(args.slug)
+    if meta is None or not ctx.state.worktree(args.slug).exists():
+        raise WorktreeNotFoundError(args.slug)
+    if land(ctx, meta) is Outcome.RESUME:
+        return run_session(ctx, meta, build_parser().parse_args(["resume", args.slug]), [])
+    return 0
+
+
+def run_session(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[str]) -> int:
+    """Launch, then hand the human the land menu; loop while they choose to resume."""
+    while True:
+        code = launch(ctx, meta, args, agent_args)
+        if args.print_prompt:
+            return code
+        if args.no_land or not sys.stdin.isatty():
+            print(summary(ctx, meta))
+            return code
+        if land(ctx, meta) is not Outcome.RESUME:
+            return code
+        agent_args = []  # the first launch's prompt was already delivered
 
 
 # ---------------------------------------------------------------- launch
@@ -166,10 +192,26 @@ def _overlays(ctx: Context, meta: Meta, steps: list[deps.Step]) -> list[sandbox.
     return overlays
 
 
-def agent_command(cmd: str, prompt_text: str, agent_args: list[str]) -> list[str]:
+SESSION_FLAGS = {"-r", "--resume", "-c", "--continue", "--session-id", "--fork-session"}
+
+
+def is_claude(cmd: str) -> bool:
+    return Path(shlex.split(cmd)[0]).name == "claude"
+
+
+def claude_transcript_exists(session_id: str) -> bool:
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    return any((config / "projects").glob(f"*/{session_id}.jsonl"))
+
+
+def agent_command(cmd: str, prompt_text: str, agent_args: list[str], session_id: str | None) -> list[str]:
     argv = shlex.split(cmd)
-    if Path(argv[0]).name == "claude":
-        argv += ["--append-system-prompt", prompt_text]
+    if not is_claude(cmd):
+        return argv + agent_args
+    argv += ["--append-system-prompt", prompt_text]
+    if session_id and not SESSION_FLAGS & set(agent_args):
+        # Continue this worktree's conversation if it got as far as writing a transcript; otherwise start it.
+        argv += ["--resume" if claude_transcript_exists(session_id) else "--session-id", session_id]
     return argv + agent_args
 
 
@@ -205,7 +247,7 @@ def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[
     prompt_file.write_text(prompt_text)
     guard.install_shim(ctx.state.bin_dir)
 
-    cmd = agent_command(args.cmd, prompt_text, agent_args)
+    cmd = agent_command(args.cmd, prompt_text, agent_args, meta.session_id)
     if caps.bwrap:
         cmd = sandbox.build_argv(main, ctx.repo.common_dir, wt, overlays, cmd)
     print(f"claude-wt: {meta.branch} at {wt}")
@@ -216,7 +258,6 @@ def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[
         code = subprocess.run(cmd, cwd=wt, env=agent_env(ctx, meta, prompt_file), check=False).returncode
     finally:
         signal.signal(signal.SIGINT, previous)
-    print(summary(ctx, meta))
     return code
 
 
@@ -228,6 +269,7 @@ def summary(ctx: Context, meta: Meta) -> str:
     return (
         f"\nclaude-wt: {meta.branch}: {ahead} commit(s) ahead of {meta.base_ref}, {state}\n"
         f"  worktree: {wt}\n"
+        f"  land:     claude-wt land {meta.slug}\n"
         f"  resume:   claude-wt resume {meta.slug}\n"
         f"  remove:   claude-wt rm {meta.slug}"
     )
@@ -237,7 +279,7 @@ def summary(ctx: Context, meta: Meta) -> str:
 
 
 def cmd_ls(_args: argparse.Namespace, _agent_args: list[str]) -> int:
-    ctx = _context()
+    ctx = Context.here()
     slugs = ctx.state.slugs()
     if not slugs:
         print("no claude-wt worktrees for this repo")
@@ -254,37 +296,16 @@ def cmd_ls(_args: argparse.Namespace, _agent_args: list[str]) -> int:
     return 0
 
 
-def cmd_rm(args: argparse.Namespace, _: list[str]) -> int:
-    ctx = _context()
+def cmd_rm(args: argparse.Namespace, _agent_args: list[str]) -> int:
+    ctx = Context.here()
     meta = ctx.state.read_meta(args.slug)
     if meta is None:
         raise WorktreeNotFoundError(args.slug)
-    wt, top = ctx.state.worktree(args.slug), ctx.repo.toplevel
-    if wt.exists():
-        entries = gitops.dirty_entries(wt)
-        if entries and not args.force:
-            raise WtError(f"{wt} has {len(entries)} uncommitted path(s); commit them or pass --force")
-        gitops.remove_worktree(top, wt, force=True)
-    ctx.state.forget(args.slug)
-    print(f"claude-wt: removed {wt}")
-    if gitops.branch_exists(top, meta.branch):
-        _drop_branch(top, meta, args.force)
+    remove(ctx, meta, args.force)
     return 0
 
 
-def _drop_branch(top: Path, meta: Meta, force: bool) -> None:
-    empty = gitops.commits_ahead(top, meta.base_sha, meta.branch) == 0
-    try:
-        gitops.delete_branch(top, meta.branch, force=force or empty)
-        print(f"claude-wt: deleted branch {meta.branch}")
-    except GitError:
-        print(
-            f"claude-wt: kept branch {meta.branch}: it has commits git doesn't see as merged "
-            f"(squash merges look unmerged). Delete with `git branch -D {meta.branch}` once you're sure."
-        )
-
-
-HANDLERS = {"new": cmd_new, "resume": cmd_resume, "ls": cmd_ls, "rm": cmd_rm}
+HANDLERS = {"new": cmd_new, "resume": cmd_resume, "land": cmd_land, "ls": cmd_ls, "rm": cmd_rm}
 
 
 def main(argv: list[str] | None = None) -> None:

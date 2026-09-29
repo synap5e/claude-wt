@@ -6,7 +6,8 @@ Launch Claude Code (or another coding agent) in a throwaway git worktree, and ke
 cd my-repo
 claude-wt                      # new worktree from HEAD, branch wt/<timestamp>, launches `claude`
 claude-wt fix-login -- --model opus   # name it; everything after -- goes to the agent
-claude-wt resume fix-login     # relaunch later
+claude-wt resume fix-login     # relaunch later, same conversation
+claude-wt land fix-login       # merge/squash/keep/discard menu
 claude-wt ls
 claude-wt rm fix-login
 ```
@@ -34,7 +35,41 @@ uv tool install .   # from a clone
      *before* git runs. Aliases are followed. `git checkout -- <file>` and `git checkout <rev> <paths>` still work.
    - if bubblewrap works: the main checkout mounted **read-only**, with the shared `.git` still writable so commits
      work.
-5. **Prints a summary** on exit: commits ahead, uncommitted paths, and the resume and remove commands.
+5. **Hands back to you** when the agent exits (see *Landing the work*).
+
+## Landing the work
+
+The branch already lives in the repo's shared `.git`, so nothing needs copying. When the agent exits you get a menu,
+and nothing touches the main checkout until you pick an option and confirm it:
+
+```
+claude-wt: wt/fix-login: 2 commit(s) ahead of main
+  [m] merge into the main checkout's branch (fast-forward when possible)
+  [s] squash into the main checkout as staged changes, for you to commit
+  [l] log of the branch's commits
+  [d] diff against where it started
+  [r] resume the agent
+  [k] keep it for later (default)
+  [x] discard: remove the worktree and delete the branch
+```
+
+- The target is whatever branch the main checkout has checked out.
+- **Merge** fast-forwards when it can; otherwise it makes a merge commit, and your hooks run. If a merge conflicts, it
+  stops and leaves the conflict in the main checkout for you. The worktree is kept.
+- **Squash** stages everything in the main checkout and doesn't commit, so you review and commit it yourself.
+- After a successful merge or squash, it offers to remove the worktree and branch.
+- **Resume** continues the same Claude conversation. claude-wt pins a session id per worktree and passes
+  `--resume` once the transcript exists.
+- `claude-wt land <slug>` reopens the menu later. `--no-land` (or a non-interactive stdin) skips it and just prints
+  a summary.
+
+**Carried changes.** With `--carry-dirty`, the branch starts with a WIP commit of your uncommitted changes, which are
+still uncommitted in main. Merging into a checkout that already has those changes would fail. So if main's
+uncommitted changes are *identical* to the WIP snapshot, claude-wt offers to clear them from main first; nothing is
+lost, because the merge brings the same content back. If you've changed them since, it refuses.
+
+Squash is usually what you want here: your in-progress changes come back uncommitted, with the agent's work
+alongside them. Merge makes them a real commit on your branch.
 
 `claude-wt rm` refuses a worktree with uncommitted changes (`--force` overrides). It deletes the branch only if it's
 empty or git sees it as merged. Squash-merged branches look unmerged, so they're kept and you get the command to
@@ -84,6 +119,7 @@ Only directories next to a tracked `pyproject.toml`/`package.json` are considere
 | `--no-sandbox` | don't use bubblewrap |
 | `--cmd CMD` | agent command (default `claude`); the system-prompt flag is only added for `claude` |
 | `--print-prompt` | show the intro and exit |
+| `--no-land` | skip the menu after the agent exits |
 
 | Environment | |
 |---|---|

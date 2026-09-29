@@ -50,17 +50,19 @@ def dirty_entries(cwd: Path) -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
-def snapshot_commit(cwd: Path, parent: str, message: str) -> str:
-    """Commit the working tree (including untracked files) without touching the real index or running hooks.
-
-    Uses a throwaway index, so the user's staged/unstaged split and their files stay exactly as they were.
-    """
+def snapshot_tree(cwd: Path, parent: str) -> str:
+    """Tree of the working tree as it stands (including untracked, non-ignored files), built in a throwaway index
+    so the user's real index and staged/unstaged split are untouched."""
     with tempfile.TemporaryDirectory(prefix="claude-wt-index-") as tmp:
         env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
         git("read-tree", parent, cwd=cwd, env=env)
         git("add", "--all", "--", ".", cwd=cwd, env=env)
-        tree = git("write-tree", cwd=cwd, env=env)
-    return git("commit-tree", tree, "-p", parent, "-m", message, cwd=cwd)
+        return git("write-tree", cwd=cwd, env=env)
+
+
+def snapshot_commit(cwd: Path, parent: str, message: str) -> str:
+    """Commit the working tree on top of `parent` without touching the real index or running hooks."""
+    return git("commit-tree", snapshot_tree(cwd, parent), "-p", parent, "-m", message, cwd=cwd)
 
 
 def resolve_commit(cwd: Path, ref: str) -> str:

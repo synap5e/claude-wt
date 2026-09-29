@@ -56,6 +56,8 @@ class Meta:
     base_sha: str
     main_checkout: str
     carried_dirty: bool
+    wip_sha: str | None = None  # the carried-changes commit, when --carry-dirty was used
+    session_id: str | None = None  # Claude session pinned to this worktree, so resume continues it
 
 
 @dataclass(frozen=True)
