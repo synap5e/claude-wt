@@ -7,6 +7,7 @@ nothing else is unshared.
 
 from __future__ import annotations
 
+import functools
 import shutil
 import subprocess
 import tempfile
@@ -29,6 +30,7 @@ class Overlay:
     work: Path  # overlayfs scratch, same fs as upper
 
 
+@functools.cache
 def probe() -> Capabilities:
     exe = shutil.which("bwrap")
     if exe is None:

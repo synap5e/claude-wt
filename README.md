@@ -117,6 +117,7 @@ Only directories next to a tracked `pyproject.toml`/`package.json` are considere
 | `--carry-dirty` / `--allow-dirty` | see above |
 | `--deps auto\|install\|none` | see above |
 | `--no-sandbox` | don't use bubblewrap |
+| `-S`, `--require-sandbox` | refuse to start (before creating anything) unless the sandbox works |
 | `--cmd CMD` | agent command (default `claude`); the system-prompt flag is only added for `claude` |
 | `--print-prompt` | show the intro and exit |
 | `--no-land` | skip the menu after the agent exits |
@@ -124,6 +125,7 @@ Only directories next to a tracked `pyproject.toml`/`package.json` are considere
 | Environment | |
 |---|---|
 | `CLAUDE_WT_ROOT` | worktree and metadata root (default `$XDG_STATE_HOME/claude-wt`) |
+| `CLAUDE_WT_REQUIRE_SANDBOX=1` | make `-S` the default; an explicit `--no-sandbox` still wins |
 | `CLAUDE_WT_VOLATILE` | overlay write root (default `${TMPDIR:-/tmp}/claude-wt-<uid>`) |
 
 The agent sees `CLAUDE_WT_WORKTREE`, `CLAUDE_WT_BRANCH`, `CLAUDE_WT_MAIN` and `CLAUDE_WT_PROMPT_FILE`.
@@ -135,7 +137,7 @@ unshared: network, other directories, and your home directory behave as normal. 
 contain a hostile agent. Claude Code's own `/sandbox` also uses bubblewrap; nesting works.
 
 If `bwrap` is missing or user namespaces are blocked (for example, Ubuntu's AppArmor restriction), claude-wt runs
-without the sandbox and says so at launch.
+without the sandbox and says so at launch, unless `-S` is set, in which case it refuses to start.
 
 ## Development
 

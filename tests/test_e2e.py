@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_wt import cli
+from claude_wt import cli, sandbox
 from claude_wt.errors import DirtyTreeError
 from claude_wt.state import RepoState, boot_id, sweep_stale_boots, volatile_root
 
@@ -180,3 +180,32 @@ def test_sweep_removes_only_other_boots() -> None:
     sweep_stale_boots()
     assert current.exists()
     assert not stale.parent.exists()
+
+
+UNAVAILABLE = sandbox.Capabilities(False, False, "bwrap not installed")
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_require_sandbox_refuses_before_creating_anything(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], how: str
+) -> None:
+    monkeypatch.setattr(sandbox, "probe", lambda: UNAVAILABLE)
+    flags = ["-S"] if how == "flag" else []
+    if how == "env":
+        monkeypatch.setenv("CLAUDE_WT_REQUIRE_SANDBOX", "1")
+    assert run("new", "t13", *flags, *agent("true")) == 2
+    assert "sandbox required but unavailable (bwrap not installed)" in capsys.readouterr().err
+    assert not worktree(repo, "t13").exists()
+    assert sh("git", "branch", "--list", "wt/t13", cwd=repo) == ""
+
+
+def test_no_sandbox_overrides_env_requirement(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandbox, "probe", lambda: UNAVAILABLE)
+    monkeypatch.setenv("CLAUDE_WT_REQUIRE_SANDBOX", "1")
+    assert run("new", "t14", *agent("true", "--no-sandbox")) == 0
+    assert worktree(repo, "t14").exists()
+
+
+@pytest.mark.usefixtures("repo")
+def test_require_and_no_sandbox_conflict() -> None:
+    assert run("new", "t15", "-S", "--no-sandbox") == 2

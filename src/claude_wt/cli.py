@@ -31,6 +31,7 @@ from .prompt import PromptContext, render
 from .state import Meta, sweep_stale_boots
 
 SUBCOMMANDS = {"new", "resume", "land", "ls", "rm"}
+REQUIRE_SANDBOX_ENV = "CLAUDE_WT_REQUIRE_SANDBOX"
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -41,7 +42,14 @@ def _launch_options(p: argparse.ArgumentParser) -> None:
         default=deps.Mode.AUTO.value,
         help="auto: overlay/reflink node_modules, install venvs (default); install: always install; none: skip",
     )
-    p.add_argument("--no-sandbox", action="store_true", help="don't wrap the agent in bubblewrap")
+    box = p.add_mutually_exclusive_group()
+    box.add_argument("--no-sandbox", action="store_true", help="don't wrap the agent in bubblewrap")
+    box.add_argument(
+        "-S",
+        "--require-sandbox",
+        action="store_true",
+        help=f"refuse to start unless the sandbox works (default when {REQUIRE_SANDBOX_ENV}=1)",
+    )
     p.add_argument("--cmd", default="claude", help="agent command (default: claude); shell-split")
     p.add_argument("--print-prompt", action="store_true", help="print the intro prompt and exit without launching")
     p.add_argument("--no-land", action="store_true", help="skip the merge/keep menu after the agent exits")
@@ -120,8 +128,21 @@ def _start_commit(ctx: Context, args: argparse.Namespace, base_sha: str) -> tupl
     return wip, wip
 
 
+def sandbox_capabilities(args: argparse.Namespace) -> sandbox.Capabilities:
+    """What the sandbox can do here. Raises when it's required and unavailable. --no-sandbox beats the env default."""
+    if args.no_sandbox:
+        return sandbox.Capabilities(False, False, "--no-sandbox")
+    caps = sandbox.probe()
+    required = args.require_sandbox or os.environ.get(REQUIRE_SANDBOX_ENV) == "1"
+    if required and not caps.bwrap:
+        raise WtError(f"sandbox required but unavailable ({caps.detail}); not starting")
+    return caps
+
+
 def cmd_new(args: argparse.Namespace, agent_args: list[str]) -> int:
     ctx = Context.here()
+    if not args.print_prompt:
+        sandbox_capabilities(args)  # fail before creating anything
     slug = args.slug or time.strftime("%Y%m%d-%H%M%S")
     _validate_slug(ctx, slug)
     base_sha = gitops.resolve_commit(ctx.repo.toplevel, args.base)
@@ -231,7 +252,7 @@ def agent_env(ctx: Context, meta: Meta, prompt_file: Path) -> dict[str, str]:
 def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[str]) -> int:
     sweep_stale_boots()
     wt, main = ctx.state.worktree(meta.slug), Path(meta.main_checkout)
-    caps = sandbox.Capabilities(False, False, "--no-sandbox") if args.no_sandbox else sandbox.probe()
+    caps = sandbox_capabilities(args)
     steps = deps.plan(deps.detect(main), main, deps.Mode(args.deps), sandboxed=caps.bwrap and caps.overlay)
     prompt_ctx = PromptContext(
         wt, meta.branch, meta.base_ref, meta.base_sha, main, meta.carried_dirty, caps.bwrap, steps
