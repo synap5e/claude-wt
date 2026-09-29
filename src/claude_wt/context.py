@@ -7,7 +7,11 @@ from . import gitops
 from .errors import GitError, WtError
 from .state import Meta, RepoState
 
-BRANCH_PREFIX = "wt/"
+
+def branch_for(slug: str) -> str:
+    """Each branch gets its own ref directory (refs/heads/wt/<slug>/), so the sandbox can make exactly that one
+    writable: git needs write access to a ref's directory, not just the ref file, to lock and replace it."""
+    return f"wt/{slug}/work"
 
 
 @dataclass(frozen=True)

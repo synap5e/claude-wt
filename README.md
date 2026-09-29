@@ -25,7 +25,7 @@ uv tool install .   # from a clone
      throwaway index and `git commit-tree`, so no hooks run and your working tree and index are left exactly as
      they were.
    - `--allow-dirty` starts from the commit anyway and leaves the changes where they are.
-2. **Creates the worktree** at `$XDG_STATE_HOME/claude-wt/<repo>-<hash>/<slug>` on branch `wt/<slug>`, from `--base`
+2. **Creates the worktree** at `$XDG_STATE_HOME/claude-wt/<repo>-<hash>/<slug>` on branch `wt/<slug>/work`, from `--base`
    (default `HEAD`).
 3. **Sets up dependency directories** (see below).
 4. **Launches the agent** in the worktree with:
@@ -33,8 +33,8 @@ uv tool install .   # from a clone
      dependency dirs. It's also written to `$CLAUDE_WT_PROMPT_FILE` for other agents.
    - a `git` shim first on its `PATH` that refuses `switch`, branch-moving `checkout`, and `worktree add/move/remove`
      *before* git runs. Aliases are followed. `git checkout -- <file>` and `git checkout <rev> <paths>` still work.
-   - if bubblewrap works: the main checkout mounted **read-only**, with the shared `.git` still writable so commits
-     work.
+   - if bubblewrap works: the main checkout mounted **read-only**, and the shared `.git` locked down so the agent
+     can commit to its own branch and nothing else (see *Sandbox notes*).
 5. **Hands back to you** when the agent exits (see *Landing the work*).
 
 ## Landing the work
@@ -43,7 +43,7 @@ The branch already lives in the repo's shared `.git`, so nothing needs copying. 
 and nothing touches the main checkout until you pick an option and confirm it:
 
 ```
-claude-wt: wt/fix-login: 2 commit(s) ahead of main
+claude-wt: wt/fix-login/work: 2 commit(s) ahead of main
   [m] merge into the main checkout's branch (fast-forward when possible)
   [s] squash into the main checkout as staged changes, for you to commit
   [l] log of the branch's commits
@@ -132,8 +132,28 @@ The agent sees `CLAUDE_WT_WORKTREE`, `CLAUDE_WT_BRANCH`, `CLAUDE_WT_MAIN` and `C
 
 ## Sandbox notes
 
-The bubblewrap sandbox is `--dev-bind / /` plus the read-only main checkout and the overlays. Nothing else is
-unshared: network, other directories, and your home directory behave as normal. Its job is to stop mistakes, not to
+The bubblewrap sandbox is `--dev-bind / /` plus the read-only main checkout, the dependency overlays, and a
+layered view of the shared `.git`:
+
+1. **A throwaway overlay over all of `.git`.** Git creates and removes lock files at the top of `.git` even for
+   routine work (deleting a pseudo-ref locks `packed-refs`). A plain read-only `.git` therefore breaks `rebase`,
+   which reports success but leaves the worktree mid-cherry-pick. Stray writes, including a planted hook, land in the
+   overlay and are discarded.
+2. **Read-only binds** over `refs`, `logs`, `HEAD`, `config`, `packed-refs`, `hooks`, `info` and `worktrees`, so
+   forbidden writes fail with an error instead of disappearing into the overlay.
+3. **Writable binds** for exactly what the agent's own branch needs: the object store, the worktree's git dir, its
+   branch's ref and reflog directories, and `refs/remotes` so `fetch` works.
+
+This is why branches are `wt/<slug>/work`. Git needs write access to a ref's *directory* to lock and replace the
+ref, so each branch gets its own directory.
+
+The result: the kernel refuses moving any other branch, whether through porcelain or plumbing (`update-ref`,
+`branch -f`, a rewritten `packed-refs`). It also refuses creating branches, changing the main checkout's HEAD, and
+editing git config or hooks. `git stash` is unavailable, because `refs/stash` is shared with the main checkout. Git's
+background maintenance is turned off inside, since it would try to pack refs. Repos using the reftable ref storage
+can't be split per branch, so they count as "no sandbox".
+
+Nothing else is unshared: network, other directories, and your home directory behave as normal. Its job is to stop mistakes, not to
 contain a hostile agent. Claude Code's own `/sandbox` also uses bubblewrap; nesting works.
 
 If `bwrap` is missing or user namespaces are blocked (for example, Ubuntu's AppArmor restriction), claude-wt runs

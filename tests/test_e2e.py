@@ -37,7 +37,7 @@ def test_launches_in_a_new_worktree_with_context(repo: Path, tmp_path: Path) -> 
     script = f'pwd > {out}; git branch --show-current >> {out}; echo "$CLAUDE_WT_BRANCH" >> {out}'
     assert run("new", "t1", *agent(script, "--no-sandbox")) == 0
     wt = worktree(repo, "t1")
-    assert out.read_text().split() == [str(wt), "wt/t1", "wt/t1"]
+    assert out.read_text().split() == [str(wt), "wt/t1/work", "wt/t1/work"]
     assert sh("git", "branch", "--show-current", cwd=repo) == "main"
 
 
@@ -96,8 +96,8 @@ def test_shim_blocks_switch_but_allows_commits(repo: Path, tmp_path: Path, sandb
     assert "switch=1" in text
     assert "checkout=1" in text
     assert "commit=0" in text
-    assert text.strip().endswith("wt/t6")
-    assert sh("git", "log", "-1", "--format=%s", "wt/t6", cwd=repo) == "c"
+    assert text.strip().endswith("wt/t6/work")
+    assert sh("git", "log", "-1", "--format=%s", "wt/t6/work", cwd=repo) == "c"
 
 
 @pytest.mark.usefixtures("repo")
@@ -148,13 +148,13 @@ def test_rm_refuses_dirty_then_removes_and_keeps_unmerged_branch(repo: Path) -> 
     os.remove(worktree(repo, "t9") / "d.txt")
     assert run("rm", "t9") == 0
     assert not worktree(repo, "t9").exists()
-    assert sh("git", "branch", "--list", "wt/t9", cwd=repo) != ""
+    assert sh("git", "branch", "--list", "wt/t9/work", cwd=repo) != ""
 
 
 def test_rm_deletes_empty_branch(repo: Path) -> None:
     assert run("new", "t10", *agent("true", "--no-sandbox")) == 0
     assert run("rm", "t10") == 0
-    assert sh("git", "branch", "--list", "wt/t10", cwd=repo) == ""
+    assert sh("git", "branch", "--list", "wt/t10/work", cwd=repo) == ""
 
 
 @pytest.mark.usefixtures("repo")
@@ -167,7 +167,7 @@ def test_duplicate_slug_is_rejected() -> None:
 def test_print_prompt_mentions_branch_and_rules(capsys: pytest.CaptureFixture[str]) -> None:
     assert run("new", "t12", "--print-prompt", "--no-sandbox") == 0
     text = capsys.readouterr().out
-    assert "wt/t12" in text
+    assert "wt/t12/work" in text
     assert "Don't switch branches" in text
 
 
@@ -196,7 +196,7 @@ def test_require_sandbox_refuses_before_creating_anything(
     assert run("new", "t13", *flags, *agent("true")) == 2
     assert "sandbox required but unavailable (bwrap not installed)" in capsys.readouterr().err
     assert not worktree(repo, "t13").exists()
-    assert sh("git", "branch", "--list", "wt/t13", cwd=repo) == ""
+    assert sh("git", "branch", "--list", "wt/t13/work", cwd=repo) == ""
 
 
 def test_no_sandbox_overrides_env_requirement(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,3 +209,38 @@ def test_no_sandbox_overrides_env_requirement(repo: Path, monkeypatch: pytest.Mo
 @pytest.mark.usefixtures("repo")
 def test_require_and_no_sandbox_conflict() -> None:
     assert run("new", "t15", "-S", "--no-sandbox") == 2
+
+
+@needs_bwrap
+def test_sandbox_pins_refs_to_own_branch(repo: Path, tmp_path: Path) -> None:
+    """The escape routes an agent actually reached for in a blind test: plumbing onto another branch, etc."""
+    out = tmp_path / "out"
+    script = (
+        f"git update-ref refs/heads/main HEAD 2>/dev/null; echo update_ref=$? >> {out}; "
+        f"git branch -f other HEAD 2>/dev/null; echo branch_f=$? >> {out}; "
+        f"git branch scratch 2>/dev/null; echo branch_new=$? >> {out}; "
+        f"git -C {repo} symbolic-ref HEAD refs/heads/other 2>/dev/null; echo symref=$? >> {out}; "
+        f"git config core.hooksPath /x 2>/dev/null; echo config=$? >> {out}; "
+        f"echo evil > {repo}/.git/hooks/post-checkout 2>/dev/null; echo hook=$? >> {out}; "
+        f"git pack-refs --all 2>/dev/null; echo pack_refs=$? >> {out}; "
+        f"echo x > c.txt && git add c.txt && git commit -qm c 2>> {out}; echo commit=$? >> {out}; "
+        f"git rebase -q other 2>> {out}; echo rebase=$? >> {out}; git status --short >> {out}"
+    )
+    sh("git", "pack-refs", "--all", cwd=repo)  # worst case: protected branches live only in packed-refs
+    main_before = sh("git", "rev-parse", "main", cwd=repo)
+    other_before = sh("git", "rev-parse", "other", cwd=repo)
+    assert run("new", "t16", "-S", *agent(script)) == 0
+    text = out.read_text()
+    for step in ("update_ref", "branch_f", "branch_new", "symref", "config", "hook", "pack_refs"):
+        assert f"{step}=0" not in text, step
+    assert "commit=0" in text
+    assert "rebase=0" in text
+    assert "error" not in text.lower()  # routine lock files land in the .git overlay, so no stray errors
+    assert text.rstrip().endswith("rebase=0")  # and the rebase left no half-finished state
+    assert not (repo / ".git" / "hooks" / "post-checkout").exists()
+    assert sh("git", "rev-parse", "main", cwd=repo) == main_before
+    assert sh("git", "rev-parse", "other", cwd=repo) == other_before
+    assert sh("git", "symbolic-ref", "HEAD", cwd=repo) == "refs/heads/main"
+    assert sh("git", "branch", "--list", "scratch", cwd=repo) == ""
+    assert sh("git", "log", "-1", "--format=%s", "wt/t16/work", cwd=repo) == "c"
+    assert sh("git", "merge-base", "--is-ancestor", "other", "wt/t16/work", cwd=repo) == ""

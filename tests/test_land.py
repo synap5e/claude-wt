@@ -44,7 +44,7 @@ def test_merge_fast_forwards_and_cleans_up(repo: Path) -> None:
     assert sh("git", "log", "-1", "--format=%s", cwd=repo) == "add c"
     assert (repo / "c.txt").exists()
     assert not ctx.state.worktree("m1").exists()
-    assert sh("git", "branch", "--list", "wt/m1", cwd=repo) == ""
+    assert sh("git", "branch", "--list", "wt/m1/work", cwd=repo) == ""
 
 
 def test_squash_brings_carried_changes_back_uncommitted(repo: Path) -> None:
@@ -57,7 +57,7 @@ def test_squash_brings_carried_changes_back_uncommitted(repo: Path) -> None:
     staged = sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
     assert sorted(staged) == ["a.txt", "c.txt", "new.txt"]
     assert (repo / "a.txt").read_text() == "in progress\n"
-    assert sh("git", "branch", "--list", "wt/s1", cwd=repo) == ""
+    assert sh("git", "branch", "--list", "wt/s1/work", cwd=repo) == ""
 
 
 def test_refuses_when_main_diverged_from_carried_snapshot(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -90,7 +90,7 @@ def test_discard_needs_confirmation(repo: Path) -> None:
     ctx, meta = start("x1", COMMIT_C)
     assert land(ctx, meta, asker("x", "n", "x", "y")) is Outcome.DONE
     assert not ctx.state.worktree("x1").exists()
-    assert sh("git", "branch", "--list", "wt/x1", cwd=repo) == ""
+    assert sh("git", "branch", "--list", "wt/x1/work", cwd=repo) == ""
 
 
 def test_merge_with_conflict_keeps_worktree(repo: Path) -> None:

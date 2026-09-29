@@ -44,6 +44,15 @@ def discover(cwd: Path) -> Repo:
     return Repo(toplevel=toplevel, common_dir=common, head=head, branch=branch)
 
 
+def git_dir(cwd: Path) -> Path:
+    return Path(git("rev-parse", "--absolute-git-dir", cwd=cwd))
+
+
+def ref_format(cwd: Path) -> str:
+    """'files' or 'reftable'. Older gits don't know the flag and only support 'files'."""
+    return git("rev-parse", "--show-ref-format", cwd=cwd, check=False) or "files"
+
+
 def dirty_entries(cwd: Path) -> list[str]:
     """Porcelain lines for modified, staged and untracked (non-ignored) files."""
     out = git("status", "--porcelain=v1", "--untracked-files=all", cwd=cwd)

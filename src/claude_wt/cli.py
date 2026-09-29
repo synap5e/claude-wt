@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 
 from . import deps, gitops, guard, sandbox
-from .context import BRANCH_PREFIX, Context, remove
+from .context import Context, branch_for, remove
 from .errors import DirtyTreeError, WorktreeNotFoundError, WtError
 from .land import Outcome, land
 from .prompt import PromptContext, render
@@ -110,8 +110,8 @@ def _validate_slug(ctx: Context, slug: str) -> None:
         raise WtError(f"invalid slug {slug!r}: use letters, digits, '.', '_' and '-'")
     if ctx.state.meta_path(slug).exists() or ctx.state.worktree(slug).exists():
         raise WtError(f"worktree {slug!r} already exists; use `claude-wt resume {slug}`")
-    if gitops.branch_exists(ctx.repo.toplevel, BRANCH_PREFIX + slug):
-        raise WtError(f"branch {BRANCH_PREFIX}{slug} already exists; pick another slug")
+    if gitops.branch_exists(ctx.repo.toplevel, branch_for(slug)):
+        raise WtError(f"branch {branch_for(slug)} already exists; pick another slug")
 
 
 def _start_commit(ctx: Context, args: argparse.Namespace, base_sha: str) -> tuple[str, str | None]:
@@ -128,11 +128,17 @@ def _start_commit(ctx: Context, args: argparse.Namespace, base_sha: str) -> tupl
     return wip, wip
 
 
-def sandbox_capabilities(args: argparse.Namespace) -> sandbox.Capabilities:
+def sandbox_capabilities(args: argparse.Namespace, repo_dir: Path) -> sandbox.Capabilities:
     """What the sandbox can do here. Raises when it's required and unavailable. --no-sandbox beats the env default."""
     if args.no_sandbox:
         return sandbox.Capabilities(False, False, "--no-sandbox")
     caps = sandbox.probe()
+    if caps.bwrap and not caps.overlay:
+        # The shared .git needs a throwaway overlay; read-only alone breaks rebase (see sandbox.py).
+        caps = sandbox.Capabilities(False, False, caps.detail)
+    elif caps.bwrap and gitops.ref_format(repo_dir) != "files":
+        # reftable keeps every ref in one set of files, so there's no per-branch directory to make writable.
+        caps = sandbox.Capabilities(False, False, "reftable ref storage can't be pinned per branch")
     required = args.require_sandbox or os.environ.get(REQUIRE_SANDBOX_ENV) == "1"
     if required and not caps.bwrap:
         raise WtError(f"sandbox required but unavailable ({caps.detail}); not starting")
@@ -142,14 +148,14 @@ def sandbox_capabilities(args: argparse.Namespace) -> sandbox.Capabilities:
 def cmd_new(args: argparse.Namespace, agent_args: list[str]) -> int:
     ctx = Context.here()
     if not args.print_prompt:
-        sandbox_capabilities(args)  # fail before creating anything
+        sandbox_capabilities(args, ctx.repo.toplevel)  # fail before creating anything
     slug = args.slug or time.strftime("%Y%m%d-%H%M%S")
     _validate_slug(ctx, slug)
     base_sha = gitops.resolve_commit(ctx.repo.toplevel, args.base)
     start, wip = _start_commit(ctx, args, base_sha)
     meta = Meta(
         slug=slug,
-        branch=BRANCH_PREFIX + slug,
+        branch=branch_for(slug),
         base_ref=ctx.repo.branch if args.base == "HEAD" and ctx.repo.branch else args.base,
         base_sha=base_sha,
         main_checkout=str(ctx.repo.toplevel),
@@ -236,9 +242,24 @@ def agent_command(cmd: str, prompt_text: str, agent_args: list[str], session_id:
     return argv + agent_args
 
 
+# Background maintenance would try to pack refs into the read-only .git and print errors after every commit.
+AGENT_GIT_CONFIG = (("maintenance.auto", "false"), ("gc.auto", "0"))
+
+
+def with_git_config(env: dict[str, str], pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """Append config via GIT_CONFIG_COUNT/KEY_n/VALUE_n, keeping any the caller already set."""
+    out = dict(env)
+    start = int(out.get("GIT_CONFIG_COUNT", "0") or 0)
+    for i, (key, value) in enumerate(pairs, start):
+        out[f"GIT_CONFIG_KEY_{i}"] = key
+        out[f"GIT_CONFIG_VALUE_{i}"] = value
+    out["GIT_CONFIG_COUNT"] = str(start + len(pairs))
+    return out
+
+
 def agent_env(ctx: Context, meta: Meta, prompt_file: Path) -> dict[str, str]:
     bin_dir = ctx.state.bin_dir
-    return {
+    env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         guard.SHIM_DIR_ENV: str(bin_dir),
@@ -247,12 +268,13 @@ def agent_env(ctx: Context, meta: Meta, prompt_file: Path) -> dict[str, str]:
         "CLAUDE_WT_MAIN": meta.main_checkout,
         "CLAUDE_WT_PROMPT_FILE": str(prompt_file),
     }
+    return with_git_config(env, AGENT_GIT_CONFIG)
 
 
 def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[str]) -> int:
     sweep_stale_boots()
     wt, main = ctx.state.worktree(meta.slug), Path(meta.main_checkout)
-    caps = sandbox_capabilities(args)
+    caps = sandbox_capabilities(args, main)
     steps = deps.plan(deps.detect(main), main, deps.Mode(args.deps), sandboxed=caps.bwrap and caps.overlay)
     prompt_ctx = PromptContext(
         wt, meta.branch, meta.base_ref, meta.base_sha, main, meta.carried_dirty, caps.bwrap, steps
@@ -270,9 +292,12 @@ def launch(ctx: Context, meta: Meta, args: argparse.Namespace, agent_args: list[
 
     cmd = agent_command(args.cmd, prompt_text, agent_args, meta.session_id)
     if caps.bwrap:
-        cmd = sandbox.build_argv(main, ctx.repo.common_dir, wt, overlays, cmd)
+        layout = sandbox.GitLayout(ctx.repo.common_dir, gitops.git_dir(wt), meta.branch)
+        sandbox.prepare_git(layout)
+        cmd = sandbox.build_argv(main, layout, wt, overlays, cmd)
     print(f"claude-wt: {meta.branch} at {wt}")
-    print(f"claude-wt: sandbox {'on (main checkout read-only)' if caps.bwrap else f'off: {caps.detail}'}", flush=True)
+    status = "on (main checkout and other branches read-only)" if caps.bwrap else f"off: {caps.detail}"
+    print(f"claude-wt: sandbox {status}", flush=True)
 
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C belongs to the agent
     try:
